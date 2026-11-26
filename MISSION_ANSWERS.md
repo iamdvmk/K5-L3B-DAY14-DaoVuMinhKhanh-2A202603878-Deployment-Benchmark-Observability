@@ -432,6 +432,32 @@ Log của agent còn sống (`docker compose -p k5-day14-scaling logs agent`) ch
 - Nếu lưu history trong RAM, mỗi instance chỉ thấy phần hội thoại mình xử lý và history sẽ bị thiếu/lộn xộn.
 Dọn dẹp: `docker compose -p k5-day14-scaling down` (dùng `-p` riêng để không nhầm với project `production` của Part 2 và Part 7).
  
+## Part 6: Final Project — output check_production_ready.py
+Chạy trong `06-lab-complete/` (WSL2, Docker 29.9.3, Python 3.11):
+```text
+================================================================
+  📋 Checklist Deliverable
+     ✅ Dockerfile (multi-stage, < 500 MB)
+     ✅ docker-compose.yml (agent + redis)
+     ✅ .dockerignore
+     ✅ Health check endpoint (GET /health)
+     ✅ Readiness endpoint (GET /ready)
+     ✅ API Key authentication
+     ✅ Rate limiting
+     ✅ Cost guard
+     ✅ Config từ environment variables
+     ✅ Structured logging
+     ✅ Graceful shutdown
+     ✅ Public URL ready (Railway / Render config)
+----------------------------------------------------------------
+  Result: 12/12 tiêu chí đạt · 43/43 checks passed
+  🎉 PASS 12/12 — PRODUCTION READY! Deploy nào!
+================================================================
+```
+- Image: 238 MB (multi-stage, `python:3.11-slim`, user non-root).
+- `docker stop`: exit code 0 trong 0.4s.
+- Ảnh: `screenshots/cp5-check-pass.png`
+
 ## AI log
 | Lần | Hỏi AI gì | Nhận được gì | Tự kiểm tra thế nào |
 |-----|-----------|--------------|---------------------|

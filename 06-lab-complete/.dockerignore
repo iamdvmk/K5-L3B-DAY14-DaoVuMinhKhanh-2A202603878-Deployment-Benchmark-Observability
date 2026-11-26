@@ -1,7 +1,17 @@
-# ============================================================
-# TODO (tiêu chí 3): liệt kê những gì KHÔNG được đưa vào Docker image
-#   • secrets: .env, .env.*  (nhưng giữ lại .env.example)
-#   • Python cache: __pycache__/, *.pyc
-#   • virtualenv: venv/, .venv/
-#   • .git/, tài liệu, thư mục benchmark-observability/ (Part 7)...
-# ============================================================
+# secrets
+.env
+.env.*
+!.env.example
+# python cache
+__pycache__/
+*.pyc
+*.pyo
+# virtualenv
+venv/
+.venv/
+# not needed in image (ASCII only)
+.git/
+*.md
+benchmark-observability/
+check_production_ready.py
+docker-compose.yml
