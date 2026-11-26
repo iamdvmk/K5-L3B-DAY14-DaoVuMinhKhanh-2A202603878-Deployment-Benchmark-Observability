@@ -1,11 +1,9 @@
-# ── Secrets ──────────────────────────────────────────────
 .env
 .env.local
 .env.production
 .env.*
 !.env.example
 
-# ── Python ──────────────────────────��────────────────────
 __pycache__/
 *.pyc
 *.pyo
@@ -16,21 +14,17 @@ dist/
 build/
 .pytest_cache/
 
-# ── Virtual environments ──────────────────────────────────
 venv/
 env/
 .venv/
 
-# ── IDE ──────────────────────────────��────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# ── OS ────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# ── Docker volumes (local dev) ─────────────────────��──────
 data/
 volumes/

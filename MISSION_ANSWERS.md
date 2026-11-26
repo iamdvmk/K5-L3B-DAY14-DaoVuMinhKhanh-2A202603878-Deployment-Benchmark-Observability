@@ -109,10 +109,78 @@ $ curl -X POST http://localhost/ask -H 'Content-Type: application/json' -d '{"qu
 ```
 
 ## Part 3: Cloud Deployment
-
-### Exercise 3.1: Railway deployment
-- URL: https://your-app.railway.app
-- Screenshot: [Link to screenshot in repo]
+ 
+### Exercise 3.1: Railway deployment (agent Part 6)
+- **Public URL:** https://agent-production-6b4e60d3.up.railway.app
+- **Platform:** Railway — project `VinUniLab14`, environment `production`, US East, 1 replica.
+  - Service `agent`: build từ `06-lab-complete/Dockerfile` theo `06-lab-complete/railway.toml`.
+  - Service `Redis`: Railway Redis database (`railway add --database redis`), nối vào agent bằng variable reference `REDIS_URL=${{Redis.REDIS_URL}}`.
+- **Các bước đã làm:**
+```bash
+railway login --browserless
+railway init                                   # tạo project
+railway add --database redis                   # thêm Redis
+railway add --service agent                    # service cho agent
+# đặt biến trên dashboard: AGENT_API_KEY, REDIS_URL (reference), ENVIRONMENT,
+# RATE_LIMIT_PER_MINUTE, DAILY_BUDGET_USD — KHÔNG đặt PORT (Railway tự cấp)
+railway up --service agent                     # build Dockerfile + deploy
+railway domain --service agent                 # tạo domain public
+```
+- **Tự kiểm trên URL public:**
+```text
+$ export BASE=https://agent-production-6b4e60d3.up.railway.app
+$ curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/health"
+200
+$ curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/ready"
+200
+$ curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/ask" -H 'Content-Type: application/json' -d '{"question":"Hello"}'
+401
+$ curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/ask" -H 'Content-Type: application/json' -H "X-API-Key: $AGENT_API_KEY" -d '{"question":"Hello"}'
+200
+$ python 06-lab-complete/check_production_ready.py --public-url "$BASE"
+...
+     ✅ Public URL: GET https://agent-production-6b4e60d3.up.railway.app/health → 200
+Result: 12/12 tiêu chí đạt · 44/44 checks passed
+🎉 PASS 12/12 — PRODUCTION READY! Deploy nào!
+```
+  URL gốc `/` trả 404 `{"detail":"Not Found"}` là bình thường vì app chỉ có route `/health`, `/ready`, `/ask`.
+- **Screenshots:** `screenshots/dashboard.png` (agent + Redis Online), `screenshots/running.png` (deployment ACTIVE, "Deployment successful"), `screenshots/test.png` (4 lệnh tự kiểm). Chi tiết trong `DEPLOYMENT.md`.
+**Sự cố gặp khi deploy và cách xử lý:**
+1. `railway up` lần đầu build Dockerfile bản khung (`FROM python:3.11`, `COPY . .`) → phải làm xong Part 6 trước khi deploy, nếu không healthcheck `/health` sẽ fail.
+2. Lỗi `header key "exclude-patterns" contains value with non-printable ASCII characters`: builder của Railway không đọc được các file ignore có comment tiếng Việt có dấu / ký tự kẻ khung / CRLF. Tôi viết lại `06-lab-complete/.dockerignore` chỉ bằng ASCII + LF, xoá các dòng comment không phải ASCII trong `.gitignore`, `.dockerignore` ở gốc repo, và deploy từ bản copy gọn của `06-lab-complete` (`app/`, `utils/`, `Dockerfile`, `requirements.txt`, `railway.toml`).
+3. Lỡ đặt biến môi trường vào service **Redis** thay vì **agent** → huỷ thay đổi, đặt lại đúng service; `REDIS_URL` của agent phải là reference tới Redis, nếu không `/ready` trả 503.
+4. `railway up` không có `--service` có thể deploy nhầm service đang được link (Redis) → luôn chạy `railway up --service agent`.
+### Exercise 3.2: So sánh `railway.toml` và `render.yaml`
+So sánh file mẫu của Part 3 (`03-cloud-deployment/railway/railway.toml`, `03-cloud-deployment/render/render.yaml`) và file tôi viết cho Part 6 (`06-lab-complete/railway.toml`, `06-lab-complete/render.yaml`):
+ 
+| | `railway.toml` | `render.yaml` (Blueprint) |
+|---|---|---|
+| Phạm vi | Cấu hình build/deploy của **một** service | Mô tả **cả hạ tầng** trong một file: web service + Redis/Key Value |
+| Build | Part 3: `builder = "NIXPACKS"` (tự nhận diện Python) + `startCommand`. Part 6: `builder = "DOCKERFILE"` | Part 3: `runtime: python` + `buildCommand`/`startCommand`. Part 6: `runtime: docker` + `dockerfilePath`, `dockerContext` |
+| Health check | `healthcheckPath = "/health"`, `healthcheckTimeout` | `healthCheckPath: /health` |
+| Restart | Khai báo `restartPolicyType = "ON_FAILURE"`, `restartPolicyMaxRetries = 3` | Không khai báo, Render tự quản lý |
+| Biến môi trường | **Không** nằm trong file; đặt trên dashboard hoặc `railway variables` | Khai báo trong `envVars`; secret dùng `sync: false` (nhập tay trên dashboard) hoặc `generateValue: true` (Render tự sinh, như `AGENT_API_KEY` ở file Part 3) |
+| Redis | Tạo bằng `railway add --database redis`, nối bằng reference `${{Redis.REDIS_URL}}` | Khai báo luôn trong file (`type: redis` ở Part 3, `type: keyvalue` ở Part 6), nối bằng `fromService ... property: connectionString` |
+| Deploy | `railway up` từ máy (CLI) hoặc nối GitHub | Blueprint đọc file từ GitHub, `autoDeploy: true` tự deploy khi push |
+| Region / plan | Chọn trên dashboard | Khai báo trong file (`region: singapore`, `plan: free`) |
+| PORT | Railway cấp biến `PORT` | Render cấp biến `PORT` (mặc định 10000) |
+ 
+**Nhận xét:** Railway theo hướng "project + dashboard" — file chỉ bổ sung cấu hình build/deploy, phần còn lại (database, biến) làm trên giao diện/CLI. Render Blueprint là Infrastructure-as-Code — service, database, tên biến đều nằm trong Git nên dựng lại môi trường giống hệt dễ hơn; chỉ giá trị secret nhập tay. Cả hai đều cấp `PORT` động nên Dockerfile Part 6 dùng chung `CMD ... uvicorn ... --port ${PORT:-8000}`, không hard-code cổng.
+ 
+### Exercise 3.3: GCP Cloud Run CI/CD (`03-cloud-deployment/production-cloud-run/`)
+**Pipeline `cloudbuild.yaml`** (Cloud Build chạy khi push lên `main`), 4 bước nối tiếp nhau bằng `waitFor`, bước nào fail thì dừng và không deploy bản lỗi:
+1. **`test`** — image `python:3.11-slim`: cài requirements + `pytest`, chạy `pytest tests/ -v`.
+2. **`build`** — `docker build` gắn 2 tag `gcr.io/$PROJECT_ID/ai-agent:$COMMIT_SHA` và `:latest`, dùng `--cache-from ...:latest` để tận dụng layer cache.
+3. **`push`** — `docker push --all-tags` lên Container Registry.
+4. **`deploy`** — `gcloud run deploy ai-agent` với image tag `$COMMIT_SHA` (mỗi bản deploy gắn đúng commit, dễ rollback), region `asia-southeast1`, `--allow-unauthenticated`, min 1 / max 10 instance, 512Mi RAM, 1 CPU, timeout 60s, `OPENAI_API_KEY` lấy từ **Secret Manager** (`--set-secrets`), không nằm trong code.
+Toàn pipeline chạy trên máy `E2_MEDIUM`, timeout 20 phút, log vào Cloud Logging.
+ 
+**`service.yaml`** (Knative Service — khai báo trạng thái mong muốn của Cloud Run):
+- Autoscaling: `minScale: "1"` (giữ 1 instance để tránh cold start), `maxScale: "10"`, mỗi instance nhận tối đa 80 request đồng thời (`containerConcurrency: 80`, `target: "80"`).
+- Tài nguyên: request 0.5 CPU / 256Mi, limit 1 CPU / 512Mi; timeout 60s; `containerPort: 8000`.
+- Biến môi trường: `ENVIRONMENT`, `PORT`; `OPENAI_API_KEY` và `AGENT_API_KEY` lấy bằng `secretKeyRef` từ Secret Manager.
+- Probe: `livenessProbe` gọi `/health` mỗi 30s (fail → restart container); `startupProbe` gọi `/ready` mỗi 3s, tối đa 10 lần (chỉ nhận traffic khi đã sẵn sàng) — đúng ý nghĩa liveness/readiness ở Part 5.
+**So với Railway:** Cloud Run + Cloud Build tách rõ test → build → push → deploy, cấu hình scale/secret/probe đều là code trong repo và có thể review; đổi lại phải tự dựng nhiều thứ hơn (registry, Secret Manager, IAM). Railway gộp build + deploy + database vào một lệnh `railway up`, nhanh cho lab nhưng ít kiểm soát hơn.
 
 ## Part 4: API Security
  
