@@ -115,12 +115,180 @@ $ curl -X POST http://localhost/ask -H 'Content-Type: application/json' -d '{"qu
 - Screenshot: [Link to screenshot in repo]
 
 ## Part 4: API Security
-
-### Exercise 4.1-4.3: Test results
-[Paste your test outputs]
-
-### Exercise 4.4: Cost guard implementation
-[Explain your approach]
+ 
+### Exercise 4.1: API Key authentication (`04-api-gateway/develop`)
+Chạy: `AGENT_API_KEY=secret-key-123 python app.py`
+ 
+- **API key được check ở đâu:** hàm `verify_api_key` trong `app.py`, gắn vào `/ask` bằng `Depends(verify_api_key)`. Hàm đọc header `X-API-Key` qua `APIKeyHeader(name="X-API-Key", auto_error=False)` rồi so với biến môi trường `AGENT_API_KEY`.
+- **Sai key thì sao:** thiếu key → **401** `Missing API key`; có key nhưng sai → **403** `Invalid API key.`
+- **Rotate key:** key đọc từ env nên chỉ cần đổi giá trị `AGENT_API_KEY` trên môi trường rồi restart/redeploy, không sửa code. Muốn không gián đoạn client thì tạm cho phép cả key cũ và key mới trong thời gian chuyển, sau đó gỡ key cũ.
+- **Nhận xét thêm:**
+  - `/ask` đọc body bằng `await request.json()` mà không validate: gọi kiểu `?question=Hello` không có JSON body → server trả **500 Internal Server Error** thay vì lỗi 4xx rõ ràng (tôi gặp lỗi này khi test).
+  - Lúc khởi động app `print(f"API Key: {API_KEY}")` → lộ secret trong log.
+  - So sánh key bằng `!=` thay vì `secrets.compare_digest` (có thể bị timing attack).
+Không có key → 401:
+```text
+$ curl -i -X POST "http://localhost:8000/ask?question=Hello"
+HTTP/1.1 401 Unauthorized
+date: Thu, 26 Nov 2026 09:11:42 GMT
+server: uvicorn
+content-length: 67
+content-type: application/json
+ 
+{"detail":"Missing API key. Include header: X-API-Key: <your-key>"}
+```
+ 
+Key đúng → 200:
+```text
+$ curl -i -X POST http://localhost:8000/ask -H "X-API-Key: secret-key-123" \
+    -H 'Content-Type: application/json' -d '{"question":"Hello"}'
+HTTP/1.1 200 OK
+date: Thu, 26 Nov 2026 09:13:19 GMT
+server: uvicorn
+content-length: 122
+content-type: application/json
+ 
+{"question":"Hello","answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận."}
+```
+ 
+### Exercise 4.2: JWT authentication (`04-api-gateway/production`)
+**JWT flow (`auth.py`):**
+1. Client gọi `POST /auth/token` với `{"username","password"}`; `authenticate_user` kiểm tra trong `DEMO_USERS` (`student`/`demo123` role `user`, `teacher` role `admin`).
+2. `create_token` tạo payload gồm `sub` (username), `role`, `iat`, `exp` (+60 phút), ký **HS256** bằng `JWT_SECRET` (đọc từ env).
+3. Client gửi `Authorization: Bearer <token>` cho mọi request.
+4. `verify_token` decode và kiểm tra chữ ký + hạn: thiếu token → **401**, token hết hạn → **401** `Token expired`, chữ ký sai → **403** `Invalid token.`
+5. Server không cần tra DB mỗi request vì username/role đã nằm trong token (stateless).
+Lấy token (token đã che):
+```text
+$ TOKEN=$(curl -s -X POST http://localhost:8000/auth/token \
+    -H 'Content-Type: application/json' \
+    -d '{"username":"student","password":"demo123"}' \
+    | python -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+$ echo ${TOKEN:0:20}...
+eyJhbGciOiJIUzI1NiIs...
+```
+ 
+Không có token → 401:
+```text
+$ curl -i -X POST http://localhost:8000/ask \
+    -H 'Content-Type: application/json' -d '{"question":"Explain JWT"}'
+HTTP/1.1 401 Unauthorized
+date: Thu, 26 Nov 2026 09:19:09 GMT
+server: uvicorn
+www-authenticate: Bearer
+content-length: 76
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+referrer-policy: strict-origin-when-cross-origin
+ 
+{"detail":"Authentication required. Include: Authorization: Bearer <token>"}
+```
+ 
+Có token → 200:
+```text
+$ curl -i -X POST http://localhost:8000/ask -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' -d '{"question":"Explain JWT"}'
+HTTP/1.1 200 OK
+date: Thu, 26 Nov 2026 09:17:45 GMT
+server: uvicorn
+content-length: 192
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+referrer-policy: strict-origin-when-cross-origin
+ 
+{"question":"Explain JWT","answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận.","usage":{"requests_remaining":9,"budget_remaining_usd":1.9e-05}}
+```
+ 
+Nhận xét:
+- Middleware `security_headers` thêm đủ `X-Content-Type-Options`, `X-Frame-Options`, `X-XSS-Protection`, `Referrer-Policy`. Nhưng `server: uvicorn` vẫn còn: middleware xoá header `server`, nhưng uvicorn gắn header này sau middleware → phải tắt bằng `server_header=False` khi chạy uvicorn.
+- Field `budget_remaining_usd` thực ra trả `usage.total_cost_usd` (số tiền **đã dùng**, 1.9e-05 USD sau 1 request), không phải số còn lại → đặt tên sai.
+### Exercise 4.3: Rate limiting (`rate_limiter.py`)
+- **Algorithm:** **Sliding Window** — mỗi user một `deque` timestamp; mỗi request bỏ các timestamp cũ hơn 60 giây rồi đếm số còn lại, nếu ≥ limit thì chặn.
+- **Limit:** `rate_limiter_user = RateLimiter(max_requests=10, window_seconds=60)` → **10 req/phút** cho user thường; `rate_limiter_admin` → **100 req/phút**.
+- **Bypass cho admin:** không bỏ qua hoàn toàn mà chọn limiter theo role trong JWT: `limiter = rate_limiter_admin if role == "admin" else rate_limiter_user`.
+- **Khi vượt:** trả **429 Too Many Requests** kèm `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`.
+- **Hạn chế:** state nằm trong RAM của process → chạy nhiều worker/instance thì mỗi nơi đếm riêng (user được nhân limit), restart là mất. Production cần lưu trong Redis (sorted set).
+Vòng lặp 15 request với token `student`:
+```text
+$ for i in $(seq 1 15); do
+    curl -s -o /dev/null -w "$i -> %{http_code}\n" -X POST http://localhost:8000/ask \
+      -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+      -d "{\"question\":\"Test $i\"}"
+  done
+1 -> 200
+2 -> 200
+3 -> 200
+4 -> 200
+5 -> 200
+6 -> 200
+7 -> 200
+8 -> 200
+9 -> 200
+10 -> 200
+11 -> 429
+12 -> 429
+13 -> 429
+14 -> 429
+15 -> 429
+```
+ 
+Response 429:
+```text
+$ curl -i -X POST http://localhost:8000/ask -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' -d '{"question":"one more"}'
+HTTP/1.1 429 Too Many Requests
+date: Thu, 26 Nov 2026 09:19:29 GMT
+server: uvicorn
+x-ratelimit-limit: 10
+x-ratelimit-remaining: 0
+x-ratelimit-reset: 1795684830
+retry-after: 50
+content-length: 98
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+referrer-policy: strict-origin-when-cross-origin
+ 
+{"detail":{"error":"Rate limit exceeded","limit":10,"window_seconds":60,"retry_after_seconds":50}}
+```
+ 
+**Giải thích:** request đầu tiên (Exercise 4.2) lúc 09:17:45 đã trượt ra khỏi cửa sổ 60 giây khi vòng lặp chạy lúc ~09:19:20, nên vòng lặp có đủ 10 request 200, request thứ 11 bị 429. `retry-after: 50` = số giây đến khi request cũ nhất trong cửa sổ hiện tại hết hạn và có lại 1 lượt.
+ 
+### Exercise 4.4: Cost guard (`cost_guard.py`)
+**Cách hoạt động hiện tại:**
+1. **Trước khi gọi LLM** — `cost_guard.check_budget(username)`:
+   - Tổng chi phí toàn hệ thống trong ngày ≥ **$10** → **503** (tạm ngừng dịch vụ đến hôm sau).
+   - Chi phí của user trong ngày ≥ **$1** → **402 Payment Required** kèm `used_usd`, `budget_usd`, `resets_at: midnight UTC`.
+   - Dùng ≥ **80%** budget → ghi log warning để cảnh báo sớm.
+2. **Sau khi gọi LLM** — `cost_guard.record_usage(username, input_tokens, output_tokens)`: cộng token vào bản ghi theo ngày (`UsageRecord.day`), chi phí = `input/1000 × $0.00015 + output/1000 × $0.0006` (giá gpt-4o-mini); sang ngày mới `_get_record` tạo bản ghi mới → tự reset.
+3. Hạn chế: state trong RAM, nhiều instance sẽ đếm riêng và mất khi restart.
+**Cách implement bằng Redis theo yêu cầu bài ($10/tháng/user, reset đầu tháng):**
+```python
+import redis
+from datetime import datetime
+ 
+r = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+MONTHLY_BUDGET_USD = 10.0
+ 
+def check_budget(user_id: str, estimated_cost: float) -> bool:
+    """True nếu còn budget, False nếu vượt."""
+    key = f"budget:{user_id}:{datetime.now().strftime('%Y-%m')}"   # mỗi tháng một key
+    current = float(r.get(key) or 0)
+    if current + estimated_cost > MONTHLY_BUDGET_USD:
+        return False                                  # endpoint trả 402
+    r.incrbyfloat(key, estimated_cost)                # cộng dồn, atomic
+    r.expire(key, 32 * 24 * 3600)                     # key tự hết hạn → reset đầu tháng
+    return True
+```
+- Key chứa `YYYY-MM` nên sang tháng mới tự dùng key mới (reset), `EXPIRE` dọn key cũ.
+- `INCRBYFLOAT` là atomic nên nhiều instance cùng cộng không bị mất số.
+- State ở Redis nên mọi instance dùng chung, restart không mất.
+**Vì sao cần cả rate limit và cost guard:** rate limit bảo vệ **tốc độ** (chặn spam, DoS, bot gọi dồn dập); cost guard bảo vệ **tiền**. Một user gửi chậm, dưới rate limit, nhưng prompt dài hoặc model đắt vẫn có thể đốt hết ngân sách → chỉ cost guard chặn được. Ngược lại, hàng nghìn request rẻ làm quá tải server thì chỉ rate limit chặn được.
 
 ## Part 5: Scaling & Reliability
 
